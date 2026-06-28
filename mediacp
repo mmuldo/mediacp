@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""
+mediacp - Maps completed downloads to organized media library locations using Claude.
+
+qBittorrent config (Tools > Options > Downloads > Run external program):
+  python3 /path/to/mediacp.py "%N" "%F"
+
+Environment variables:
+  MEDIACP_MOVIES  - base path for movies (default: /media/movies)
+  MEDIACP_SHOWS   - base path for TV shows (default: /media/shows)
+  MEDIACP_LOG     - log file path (default: /var/log/mediacp.log)
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Literal, TypedDict
+
+MOVIES_BASE = Path(os.environ.get("MEDIACP_MOVIES", "/media/movies"))
+SHOWS_BASE = Path(os.environ.get("MEDIACP_SHOWS", "/media/shows"))
+LOG_FILE = Path(os.environ.get("MEDIACP_LOG", "/var/log/mediacp.log"))
+
+VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts"}
+
+
+class FileMapping(TypedDict):
+    src: str
+    dest: str
+
+
+class MediaMapping(TypedDict):
+    type: Literal["movie", "show"]
+    mappings: list[FileMapping]
+
+
+def log(msg: str) -> None:
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n"
+    try:
+        with open(LOG_FILE, "a") as f:
+            f.write(line)
+    except OSError:
+        pass
+    print(line, end="", file=sys.stderr)
+
+
+def collect_video_files(content_path: Path) -> list[Path]:
+    if content_path.is_file():
+        return [content_path]
+    return sorted(
+        p for p in content_path.rglob("*")
+        if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
+    )
+
+
+def extract_json(text: str) -> MediaMapping:
+    start = text.index("{")
+    end = text.rindex("}") + 1
+    return json.loads(text[start:end])
+
+
+def ask_claude(name: str, files: list[Path], content_path: Path) -> MediaMapping:
+    if len(files) == 1 and files[0] == content_path:
+        file_list = files[0].name
+    else:
+        file_list = "\n".join(str(f.relative_to(content_path)) for f in files)
+
+    prompt = (
+        f"/mediacp\n\n"
+        f"Name: {name}\n"
+        f"Files:\n{file_list}"
+    )
+
+    result = subprocess.run(
+        ["claude", "-p"],
+        input=prompt,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(f"claude exited {result.returncode}: {result.stderr.strip()}")
+
+    try:
+        return extract_json(result.stdout)
+    except (ValueError, json.JSONDecodeError) as e:
+        raise RuntimeError(f"could not parse JSON from claude output: {e}\n{result.stdout}")
+
+
+def resolve_src(src_rel: str, content_path: Path, files: list[Path]) -> Path | None:
+    candidate = Path(src_rel)
+    if candidate.is_absolute() and candidate.exists():
+        return candidate
+
+    candidate = content_path / src_rel
+    if candidate.exists():
+        return candidate
+
+    name = Path(src_rel).name
+    matches = [f for f in files if f.name == name]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        for f in matches:
+            if str(f).endswith(src_rel):
+                return f
+        return matches[0]
+
+    return None
+
+
+def do_copy(src: Path, dest: Path) -> bool:
+    """Returns True if copied, False if skipped (dest already exists)."""
+    if dest.exists():
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(["cp", "-n", str(src), str(dest)])
+    if result.returncode != 0:
+        raise RuntimeError(f"cp failed (exit {result.returncode})")
+    return True
+
+
+def main() -> None:
+    if len(sys.argv) < 3:
+        print("Usage: mediacp.py <name> <content_path> [--no-sleep]")
+        sys.exit(1)
+
+    name = sys.argv[1]
+    content_path = Path(sys.argv[2])
+    no_sleep = "--no-sleep" in sys.argv
+
+    if not no_sleep:
+        # Wait for qBittorrent to release file locks during seeding transition
+        time.sleep(10)
+
+    log(f"START name={name!r} content={content_path}")
+
+    files = collect_video_files(content_path)
+    if not files:
+        log(f"ERROR no video files found under {content_path}")
+        sys.exit(1)
+
+    log(f"FOUND {len(files)} video file(s)")
+
+    try:
+        mapping = ask_claude(name, files, content_path)
+    except Exception as e:
+        log(f"ERROR calling Claude: {e}")
+        sys.exit(1)
+
+    media_type = mapping["type"]
+    base = SHOWS_BASE if media_type == "show" else MOVIES_BASE
+    log(f"TYPE {media_type} -> {base}")
+
+    errors = 0
+    for entry in mapping["mappings"]:
+        src = resolve_src(entry["src"], content_path, files)
+        if src is None:
+            log(f"ERROR src not found: {entry['src']!r}")
+            errors += 1
+            continue
+
+        dest = base / entry["dest"]
+
+        try:
+            copied = do_copy(src, dest)
+            log(f"{'COPY' if copied else 'SKIP'} {src} -> {dest}")
+        except Exception as e:
+            log(f"ERROR {src} -> {dest}: {e}")
+            errors += 1
+
+    if errors:
+        log(f"DONE name={name!r} with {errors} error(s)")
+        sys.exit(1)
+    else:
+        log(f"DONE name={name!r}")
+
+
+if __name__ == "__main__":
+    main()
