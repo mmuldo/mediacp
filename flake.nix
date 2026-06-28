@@ -10,7 +10,7 @@
     in
     {
       packages = forAllSystems (system:
-        let pkgs = nixpkgs.legacyPackages.${system}; in
+        let pkgs = import nixpkgs { inherit system; config.allowUnfree = true; }; in
         {
           default = pkgs.writeShellApplication {
             name = "mediacp";
