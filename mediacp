@@ -22,6 +22,7 @@ from typing import Literal, TypedDict
 MOVIES_BASE = Path(os.environ.get("MEDIACP_MOVIES", "/media/movies"))
 SHOWS_BASE = Path(os.environ.get("MEDIACP_SHOWS", "/media/shows"))
 LOG_FILE = Path(os.environ.get("MEDIACP_LOG", "/var/log/mediacp.log"))
+JELLYFIN_API_KEY = os.environ.get("MEDIACP_JELLYFIN_API_KEY", "")
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts"}
 
@@ -171,6 +172,17 @@ def main() -> None:
         except Exception as e:
             log(f"ERROR {src} -> {dest}: {e}")
             errors += 1
+
+    if JELLYFIN_API_KEY:
+        try:
+            subprocess.run(
+                ["jfscan"],
+                env={**os.environ, "JFSCAN_TOKEN": JELLYFIN_API_KEY},
+                check=True,
+            )
+            log("SCAN jellyfin library refresh triggered")
+        except Exception as e:
+            log(f"WARN jellyfin scan failed: {e}")
 
     if errors:
         log(f"DONE name={name!r} with {errors} error(s)")

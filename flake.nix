@@ -1,9 +1,13 @@
 {
   description = "mediacp — media-library organiser using Claude";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    jfscan.url = "github:mmuldo/jfscan";
+    jfscan.inputs.nixpkgs.follows = "nixpkgs";
+  };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, jfscan }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
@@ -14,7 +18,7 @@
         {
           default = pkgs.writeShellApplication {
             name = "mediacp";
-            runtimeInputs = [ pkgs.python3 pkgs.claude-code ];
+            runtimeInputs = [ pkgs.python3 pkgs.claude-code jfscan.packages.${system}.default ];
             text = ''
               exec python3 ${./mediacp} "$@"
             '';
